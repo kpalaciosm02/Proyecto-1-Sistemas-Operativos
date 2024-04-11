@@ -3,14 +3,24 @@
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
+
+#include "queue.h"
 
 #define MAX_PATH_LENGTH 256
+#define FOUND 0
+#define NOT_FOUND 1
+#define OPEN_ERROR 2
+#define READ_ERROR 4
 
-int count_files_in_folder(const char *path);
+int count_files_in_folder(const char *path, struct Queue *file_queue);
 
 int main(int argc, char *argv[]){
     char path_folder_1[MAX_PATH_LENGTH];
     char path_folder_2[MAX_PATH_LENGTH];
+
+    struct Queue *path_queue = createQueue();
 
     if (argc != 3){
         printf("Not enough routes.\n");
@@ -26,13 +36,15 @@ int main(int argc, char *argv[]){
     printf("First folder path is: %s\n", path_folder_1);
     printf("Second folder path is: %s\n", path_folder_2);
 
-    int file_count = count_files_in_folder(path_folder_1);
+    int file_count = count_files_in_folder(path_folder_1, path_queue);
 
     printf("Total number of files in forlder (%s) is: %d\n",path_folder_1,file_count);
+    printf("Content in queue: \n");
+    printQueue(path_queue);
     return 0;
 }
 
-int count_files_in_folder(const char *path){
+int count_files_in_folder(const char *path, struct Queue *file_queue){
     DIR *dir;
     struct dirent *entry;
     struct stat statbuf;
@@ -56,8 +68,10 @@ int count_files_in_folder(const char *path){
             if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
                 continue;
 
-            count += count_files_in_folder(full_path); // Recursively count files in subdirectory
+            count += count_files_in_folder(full_path,file_queue); // Recursively count files in subdirectory
         } else if (S_ISREG(statbuf.st_mode)) {
+            enqueue(file_queue,full_path);
+            //printf("File name: %s\n",full_path);
             count++; // Regular file
         }
     }
