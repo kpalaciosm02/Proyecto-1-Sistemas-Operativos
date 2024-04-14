@@ -40,6 +40,8 @@ void enqueue(struct Queue* q, char *path) {
     q->rear = temp;
 }
 
+
+
 char* dequeue(struct Queue* q) {
     if (q->front == NULL)
         return NULL;
@@ -47,8 +49,16 @@ char* dequeue(struct Queue* q) {
     q->front = q->front->next;
     if (q->front == NULL)
         q->rear = NULL;
-    char *path = temp->path;
+
+    char *path = (char*)malloc(MAX_PATH_LENGTH * sizeof(char));
+    if (path == NULL) {
+        return NULL;
+    }
+    strncpy(path, temp->path, MAX_PATH_LENGTH - 1);
+    path[MAX_PATH_LENGTH - 1] = '\0';
+
     free(temp);
+
     return path;
 }
 

@@ -12,7 +12,7 @@
 #define BUFFER_SIZE 4096
 
 int count_files_in_folder(const char *path, struct Queue *file_queue, struct Queue *new_path_queue);
-int copy_file(char *source_path, char *destination_path);
+int copy_file(const char *source_path, const char *destination_path);
 char *replace_source_path(const char *source_path, const char *file_source_path, const char *destination_path);
 int create_folders(const char *path);
 char *remove_file_name(const char *path);
@@ -48,6 +48,12 @@ int main(int argc, char *argv[]){
     printQueue(new_path_queue);
     //create_folders(remove_file_name(path_queue));
     //create_folders("/home/kenneth/Desktop/paste-here/Folder-1/Folder-2");
+
+    char *file_1 = dequeue(path_queue);
+    char *file_2 = dequeue(new_path_queue);
+    printf("File 2: %s\n", file_2);
+    copy_file(file_1,file_2);
+
     return 0;
 }
 
@@ -96,52 +102,34 @@ int count_files_in_folder(const char *path, struct Queue *file_queue, struct Que
     return count;
 }
 
-int copy_file(char *source_path, char *destination_path){
-    //printf("Source path: %s\n",source_path);
-    //printf("Destination path: %s\n",source_path);
-
-
-
-    FILE *source_file, *destination_file;
+int copy_file(const char *source_path, const char *destination_path) {
+    FILE *src_file, *dest_file;
     char buffer[BUFFER_SIZE];
     size_t bytes_read;
 
     // Open the source file for reading
-    source_file = fopen(source_path, "rb");
-    if (source_file == NULL) {
-        //printf("Trying to open: %s\n",source_path);
-        perror("Failed to open source file");
-        return 1;
-    }
-
-    // Create the directory for the destination file if it doesn't exist
-    if (mkdir(destination_path, 0777) == -1) {
-        perror("Failed to create destination directory");
-        fclose(source_file);
-        return 1;
+    src_file = fopen(source_path, "rb");
+    if (src_file == NULL) {
+        perror("Error opening source file");
+        return;
     }
 
     // Open the destination file for writing
-    destination_file = fopen("home/kenneth/Desktop/paste-here/file-1.txt", "wb");
-    if (destination_file == NULL) {
-        perror("Failed to open destination file");
-        fclose(source_file);
-        return 1;
+    dest_file = fopen(destination_path, "wb");
+    if (dest_file == NULL) {
+        perror("Error opening destination file");
+        fclose(src_file);
+        return;
     }
 
-    // Copy data from source to destination
-    while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, source_file)) > 0) {
-        if (fwrite(buffer, 1, bytes_read, destination_file) != bytes_read) {
-            perror("Error writing to destination file");
-            fclose(source_file);
-            fclose(destination_file);
-            return 1;
-        }
+    // Copy contents from source file to destination file
+    while ((bytes_read = fread(buffer, 1, sizeof(buffer), src_file)) > 0) {
+        fwrite(buffer, 1, bytes_read, dest_file);
     }
 
     // Close files
-    fclose(source_file);
-    fclose(destination_file);
+    fclose(src_file);
+    fclose(dest_file);
 
     printf("File copied successfully\n");
 }
