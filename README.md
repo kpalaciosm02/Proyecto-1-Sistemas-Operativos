@@ -7,7 +7,8 @@
 - All directories needed to store new files are created.
 - Function that copies a file from a directory to another
 - Process pool creation
-- Each process
+- Each process uses shared memory to get a file to copy to the new directory
+- The processes of this pool copy files until there is none missing
 
 # To do:
 - Documentation
