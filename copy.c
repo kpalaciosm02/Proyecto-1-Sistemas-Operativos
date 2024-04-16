@@ -1,22 +1,25 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <errno.h>
+#include <sys/shm.h>
+#include <sys/sem.h>
+#include <sys/wait.h>
+#include <stdio.h>
+#include <unistd.h>
 
 #include "queue.h"
 
 #define MAX_PATH_LENGTH 512
 #define BUFFER_SIZE 4096
+#define PROCESS_AMOUNT 3
+#define SHM_KEY 1234
+#define SEM_KEY 5678
 
 int count_files_in_folder(const char *path, struct Queue *file_queue, struct Queue *new_path_queue);
-int copy_file(const char *source_path, const char *destination_path);
+void copy_file(const char *source_path, const char *destination_path);
 char *replace_source_path(const char *source_path, const char *file_source_path, const char *destination_path);
 int create_folders(const char *path);
 char *remove_file_name(const char *path);
-void create_all_folders();
+void call_copy_file(struct Queue *file_queue, struct Queue *new_path_queue);
 
 int main(int argc, char *argv[]){
     char path_folder_1[MAX_PATH_LENGTH];
@@ -24,6 +27,37 @@ int main(int argc, char *argv[]){
 
     struct Queue *path_queue = createQueue();
     struct Queue *new_path_queue = createQueue();
+
+        int shmid, semid;
+    struct SharedMemory {
+        struct Queue *path_queue;
+        struct Queue *new_path_queue;
+    };
+    struct SharedMemory *shared_memory;
+    int pid;
+
+    shmid = shmget(SHM_KEY, sizeof(struct SharedMemory), IPC_CREAT | 0666);
+    if (shmid == -1) {
+        perror("shmget");
+        exit(1);
+    }
+
+    shared_memory = (struct SharedMemory *)shmat(shmid, NULL, 0);
+    if (shared_memory == (void *)-1) {
+        perror("shmat");
+        exit(1);
+    }
+
+    shared_memory->path_queue = createQueue();
+    shared_memory->new_path_queue = createQueue();
+
+    semid = semget(SEM_KEY, 1, IPC_CREAT | 0666);
+    if (semid == -1) {
+        perror("semget");
+        exit(1);
+    }
+
+    semctl(semid, 0, SETVAL, 1);
 
     if (argc != 3){
         printf("Not enough routes.\n");
@@ -39,21 +73,51 @@ int main(int argc, char *argv[]){
     printf("First folder path is: %s\n", path_folder_1);
     printf("Second folder path is: %s\n", path_folder_2);
 
-    int file_count = count_files_in_folder(path_folder_1, path_queue, new_path_queue);
+    int file_count = count_files_in_folder(path_folder_1, shared_memory->path_queue, shared_memory->new_path_queue);
 
-    //printf("Total number of files in forlder (%s) is: %d\n",path_folder_1,file_count);
     printf("Content in queue: \n");
     printQueue(path_queue);
     printf("Content in new path queue: \n");
     printQueue(new_path_queue);
-    //create_folders(remove_file_name(path_queue));
-    //create_folders("/home/kenneth/Desktop/paste-here/Folder-1/Folder-2");
 
-    char *file_1 = dequeue(path_queue);
-    char *file_2 = dequeue(new_path_queue);
-    printf("File 2: %s\n", file_2);
-    copy_file(file_1,file_2);
+    for (int i = 0; i < PROCESS_AMOUNT; i++) {
+        pid = fork();
+        if (pid == -1) {
+            perror("fork");
+            exit(1);
+        } else if (pid == 0) {
+            while (!isEmpty(shared_memory->path_queue) && !isEmpty(shared_memory->new_path_queue)) {
+                struct sembuf sem_op;
+                sem_op.sem_num = 0;
+                sem_op.sem_op = -1;
+                sem_op.sem_flg = 0;
+                semop(semid, &sem_op, 1);
 
+                char *file = dequeue(shared_memory->path_queue);
+                char *new_file = dequeue(shared_memory->new_path_queue);
+
+                sem_op.sem_op = 1;
+                semop(semid, &sem_op, 1);
+
+                if (file != NULL && new_file != NULL) {
+                    printf("Process %d dequeued file: %s, new path: %s\n", getpid(), file, new_file);
+                    copy_file(file,new_file);
+                }
+            }
+            exit(0);
+        } else {
+            wait(NULL);
+        }
+    }
+
+    for (int i = 0; i < PROCESS_AMOUNT; i++) {
+        wait(NULL);
+    }
+
+    shmdt(shared_memory);
+
+    shmctl(shmid, IPC_RMID, NULL);
+    semctl(semid, 0, IPC_RMID);
     return 0;
 }
 
@@ -102,7 +166,7 @@ int count_files_in_folder(const char *path, struct Queue *file_queue, struct Que
     return count;
 }
 
-int copy_file(const char *source_path, const char *destination_path) {
+void copy_file(const char *source_path, const char *destination_path) {
     FILE *src_file, *dest_file;
     char buffer[BUFFER_SIZE];
     size_t bytes_read;
@@ -228,3 +292,18 @@ char *remove_file_name(const char *path){
     return new_path;
 }
 
+void call_copy_file(struct Queue *file_queue, struct Queue *new_path_queue){
+    int pid = (int) getpid();
+    char *file = dequeue(file_queue);
+    char *new_file = dequeue(new_path_queue);
+    if (!file && !new_file){
+        printf("No more files to copy.");
+        return;
+    } else if (!file | !new_file) {
+        printf("Error, files and new paths do not match.");
+    } else {
+        printf("Process: %d copying file from %s to %s.\n", pid, file, new_file);
+        copy_file(file,new_file);
+        return;
+    }
+}
