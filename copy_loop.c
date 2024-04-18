@@ -9,6 +9,7 @@
 #include <sys/types.h>
 #include <sys/msg.h>
 #include <string.h>
+#include <signal.h>
 
 #include "queue.h"
 
@@ -26,6 +27,11 @@ int create_folders(const char *path);
 char *remove_file_name(const char *path);
 void call_copy_file(struct Queue *file_queue, struct Queue *new_path_queue);
 int send_child_copy_file(char *source_path, char *destination_path, int type, int msqid);
+void send_path_to_child(const char *source_path, const char *destination_path, int child_id, int msqid);
+void receive_path_from_parent(char *source_path, char *destination_path, int child_id, int msqid);
+void send_path_to_child(const char *source_path, const char *destination_path, int child_id, int msqid);
+void receive_path_from_parent(char *source_path, char *destination_path, int child_id, int msqid);
+
 
 struct paths {
     long type;
@@ -52,28 +58,40 @@ int main(int argc, char *argv[]){
     int file_count = count_files_in_folder(path_folder_1, path_queue, new_path_queue);
 
     int status;
+    key_t confkey = 888;
+    int confid = msgget(confkey, IPC_CREAT | S_IRUSR | S_IWUSR);
     key_t msqkey = 999;
     int msqid = msgget(msqkey, IPC_CREAT | S_IRUSR | S_IWUSR);
+    int pids[PROCESS_AMOUNT];
 
     struct paths path_msg;
-    
+
     for (int i = 0; i < PROCESS_AMOUNT; i++){
         pid_t pid = fork();
+        pids[i] = pid;
         if (pid < 0) {
             perror("Fork failed");
             exit(EXIT_FAILURE);
         } else if (pid == 0) {
-            msgrcv(msqid, &path_msg, sizeof(path_msg), i + 1, 0);
-            
-            printf("Child process with id: %d received source path: %s and destination path: %s\n",getpid(), path_msg.source_path, path_msg.destination_path);
+            while (1){
+                char source_path[MAX_PATH_LENGTH];
+                char destination_path[MAX_PATH_LENGTH];
 
-            int confirmation = 1;
-            if (msgsnd(msqid, &confirmation, sizeof(int), 0) == -1) {
-                perror("Confirmation message sending failed");
-                exit(EXIT_FAILURE);
+                receive_path_from_parent(source_path, destination_path, i + 1, msqid);
+
+                if (strlen(source_path) == 0 && strlen(destination_path) == 0) {
+                    int confirmation = 1;
+                    if (msgsnd(confid, &confirmation, sizeof(int), 0) == -1) {
+                        perror("Confirmation message sending failed");
+                        exit(EXIT_FAILURE);
+                    }
+                    //printf("Proceso terminado\n\n\n\n");
+                    break; // Exit the loop
+                }
+                copy_file(source_path,destination_path);
+                printf("Child process with id: %d received source path: %s and destination path: %s\n", getpid(), source_path, destination_path);
             }
-
-            exit(EXIT_SUCCESS);
+            //exit(EXIT_SUCCESS);
         }
     }
 
@@ -90,9 +108,29 @@ int main(int argc, char *argv[]){
         }
     }
     
+    for (int i = 0; i < PROCESS_AMOUNT; i++){
+        send_child_copy_file("","",i+1,msqid);
+    }
+
+    int terminated_amount = 0;
+    while (terminated_amount < PROCESS_AMOUNT){
+        for (int i = 0; i < PROCESS_AMOUNT; i++){
+            int confirmation;
+            if (msgrcv(confid,&confirmation,sizeof(confirmation),0,0) == -1){
+                perror("Error receiving confirmation message");
+                exit(EXIT_FAILURE);
+            }
+            if (confirmation == 1){
+                printf("Confirmation received from child process: %d\n", i + 1);
+                terminated_amount++;
+            }
+        }
+        
+        usleep(100000);
+    }
 
     for (int i = 0; i < PROCESS_AMOUNT; i++) {
-        wait(&status);
+        kill(pids[i],SIGKILL);
     }
 
     msgctl(msqid, IPC_RMID, NULL);
@@ -288,17 +326,47 @@ void call_copy_file(struct Queue *file_queue, struct Queue *new_path_queue){
 }
 
 int send_child_copy_file(char *source_path, char *destination_path, int type, int msqid){
+    if (source_path != ""){
+        struct paths path_msg;
+        path_msg.type = type;
+        strcpy(path_msg.source_path, source_path);
+        strcpy(path_msg.destination_path, destination_path);
+
+        printf("Source path send from parent process: %s\n",path_msg.source_path);
+        printf("Destination path send from parent process: %s\n\n",path_msg.source_path);
+
+        if (msgsnd(msqid, (void *)&path_msg, sizeof(path_msg), IPC_NOWAIT) == -1) {
+            perror("Send child copy file failed");
+            exit(EXIT_FAILURE);
+        }
+    } else{
+
+    }
+    
+    //printf("Message %d sent to child process %d\n", type, type);
+}
+
+void send_path_to_child(const char *source_path, const char *destination_path, int child_id, int msqid) {
     struct paths path_msg;
-    path_msg.type = type;
-    strcpy(path_msg.source_path, source_path);
-    strcpy(path_msg.destination_path, destination_path);
-
-    printf("Source path send from parent process: %s\n",path_msg.source_path);
-    printf("Destination path send from parent process: %s\n\n",path_msg.source_path);
-
-    if (msgsnd(msqid, (void *)&path_msg, sizeof(path_msg), IPC_NOWAIT) == -1) {
-        perror("msgsnd failed");
+    // Set the source and destination paths in the message
+    strncpy(path_msg.source_path, source_path, sizeof(path_msg.source_path));
+    strncpy(path_msg.destination_path, destination_path, sizeof(path_msg.destination_path));
+    // Send the message to the child process with id = child_id
+    if (msgsnd(msqid, &path_msg, sizeof(path_msg), 0) == -1) {
+        perror("Path message sending failed");
         exit(EXIT_FAILURE);
     }
-    //printf("Message %d sent to child process %d\n", type, type);
+}
+
+// Function to receive a path message from the parent process
+void receive_path_from_parent(char *source_path, char *destination_path, int child_id, int msqid) {
+    struct paths path_msg;
+    // Receive a message from the parent process with type = child_id
+    if (msgrcv(msqid, &path_msg, sizeof(path_msg), child_id, 0) == -1) {
+        perror("Failed to receive path message");
+        exit(EXIT_FAILURE);
+    }
+    // Copy the source and destination paths from the message
+    strncpy(source_path, path_msg.source_path, sizeof(path_msg.source_path));
+    strncpy(destination_path, path_msg.destination_path, sizeof(path_msg.destination_path));
 }
