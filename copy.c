@@ -189,6 +189,12 @@ void copy_file(const char *source_path, const char *destination_path) {
         return;
     }
 
+    fseek(src_file, 0, SEEK_END); // Move to the end of the file
+    long int file_size = ftell(src_file); // Get the current position, which is the file size
+    fseek(src_file, 0, SEEK_SET); // Reset file pointer to the beginning
+
+    printf("Source file: %s size: %ld bytes\n", source_path, file_size);
+
     dest_file = fopen(destination_path, "wb");
     if (dest_file == NULL) {
         perror("Error opening destination file");
