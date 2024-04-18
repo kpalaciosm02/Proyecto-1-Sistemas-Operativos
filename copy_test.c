@@ -8,11 +8,23 @@
 
 #include "queue.h"
 
+#include <sys/types.h>
+#include <sys/ipc.h>
+#include <sys/sem.h>
+
 #define MAX_PATH_LENGTH 512
 #define BUFFER_SIZE 4096
 #define PROCESS_AMOUNT 3
-#define SHM_KEY 1234
-#define SEM_KEY 5678
+#define SHM_SIZE sizeof(struct Queue)
+#define SEM_MUTEX_KEY 1234
+#define SEM_EMPTY_KEY 5678
+#define SEM_FULL_KEY 9101
+
+union semun {
+    int val;
+    struct semid_ds *buf;
+    unsigned short *array;
+};
 
 int count_files_in_folder(const char *path, struct Queue *file_queue, struct Queue *new_path_queue);
 void copy_file(const char *source_path, const char *destination_path);
@@ -25,45 +37,35 @@ int main(int argc, char *argv[]){
     char path_folder_1[MAX_PATH_LENGTH];
     char path_folder_2[MAX_PATH_LENGTH];
 
-        int shmid, semid;
-    struct SharedMemory {
-        struct Queue *path_queue;
-        struct Queue *new_path_queue;
-    };
-    struct SharedMemory *shared_memory = malloc(sizeof(struct SharedMemory));
-    int pid;
+    struct Queue * path_queue = createQueue();
+    struct Queue * new_path_queue = createQueue();
 
-    shmid = shmget(SHM_KEY, sizeof(struct SharedMemory), IPC_CREAT | 0666);
-    if (shmid == -1) {
+    int shmid, sem_mutex, sem_empty, sem_full;
+    key_t key = ftok(".", 'q');
+    pid_t child_pids[PROCESS_AMOUNT];
+
+    if ((shmid = shmget(key, SHM_SIZE, IPC_CREAT | 0666)) < 0) {
         perror("shmget");
         exit(1);
     }
 
-    shared_memory = (struct SharedMemory *)shmat(shmid, NULL, 0);
-    if (shared_memory == (void *)-1) {
+    if ((path_queue = shmat(shmid, NULL, 0)) == (struct Queue *) -1) {
         perror("shmat");
         exit(1);
     }
 
-    shared_memory->path_queue = createQueue();
-    shared_memory->new_path_queue = createQueue();
-
-    semid = semget(SEM_KEY, PROCESS_AMOUNT, IPC_CREAT | 0666);
-    if (semid == -1) {
-        perror("semget");
-        exit(1);
-    }
-
-    for (int i = 0; i < PROCESS_AMOUNT; i++) {
-    if (semctl(semid, i, SETVAL, 1) == -1) {
-        perror("semctl");
-        exit(1);
-    }
-}
-
-    if (argc != 3){
-        printf("Not enough routes.\n");
-        return 1;
+    if ((sem_mutex = semget(SEM_MUTEX_KEY, 1, IPC_CREAT | IPC_EXCL | 0666)) < 0) {
+        if ((sem_mutex = semget(SEM_MUTEX_KEY, 1, 0)) < 0) {
+            perror("semget(mutex)");
+            exit(1);
+        }
+    } else {
+        union semun arg;
+        arg.val = 1;
+        if (semctl(sem_mutex, 0, SETVAL, arg) < 0) {
+            perror("semctl(mutex)");
+            exit(1);
+        }
     }
 
     strncpy(path_folder_1, argv[1], MAX_PATH_LENGTH - 1);
@@ -75,52 +77,79 @@ int main(int argc, char *argv[]){
     printf("First folder path is: %s\n", path_folder_1);
     printf("Second folder path is: %s\n", path_folder_2);
 
-    int file_count = count_files_in_folder(path_folder_1, shared_memory->path_queue, shared_memory->new_path_queue);
+    int file_count = count_files_in_folder(path_folder_1, path_queue, new_path_queue);
 
     for (int i = 0; i < PROCESS_AMOUNT; i++) {
-        pid = fork();
-        if (pid == -1) {
+        pid_t pid = fork();
+        if (pid < 0) {
             perror("fork");
             exit(1);
         } else if (pid == 0) {
-            while (!isEmpty(shared_memory->path_queue) && !isEmpty(shared_memory->new_path_queue)) {
-                struct sembuf sem_op;
-                sem_op.sem_num = 0;
-                sem_op.sem_op = -1;
-                sem_op.sem_flg = 0;
-                if (semop(semid, &sem_op, 1) == -1) {
-                    perror("semop");
-                    exit(1);
-                }
+            while (1) {
+                struct sembuf sem_wait_empty = {0, -1, 0};
+                semop(sem_empty, &sem_wait_empty, 1);
 
-                char *file = dequeue(shared_memory->path_queue);
-                char *new_file = dequeue(shared_memory->new_path_queue);
+                struct sembuf sem_lock_mutex = {0, -1, 0};
+                semop(sem_mutex, &sem_lock_mutex, 1);
 
-                sem_op.sem_op = 1;
-                if (semop(semid, &sem_op, 1) == -1) {
-                    perror("semop");
-                    exit(1);
-                }
+                char *path = dequeue(path_queue);
+                char *new_path = dequeue(new_path_queue);
 
-                if (file != NULL && new_file != NULL) {
-                    printf("Process %d dequeued file: %s, new path: %s\n", getpid(), file, new_file);
-                    copy_file(file,new_file);
+                struct sembuf sem_release_mutex = {0, 1, 0};
+                semop(sem_mutex, &sem_release_mutex, 1);
+
+                struct sembuf sem_signal_full = {0, 1, 0};
+                semop(sem_full, &sem_signal_full, 1);
+
+                if (path != NULL) {
+                    printf("Child %d dequeued: %s\n", getpid(), path);
+                    copy_file(path,new_path);
+                    free(path);
+                    free(new_path);
+                } else {
+                    wait(NULL);
+                    exit(0);
                 }
             }
-            exit(0);
         } else {
-            wait(NULL);
+            child_pids[i] = pid;
         }
     }
 
     for (int i = 0; i < PROCESS_AMOUNT; i++) {
-        wait(NULL);
+        int status;
+        waitpid(child_pids[i], &status, 0);
+        printf("Child process %d finished with status %d\n", child_pids[i], status);
     }
 
-    shmdt(shared_memory);
+    for (int i = 1; i < argc; i++) {
+        struct sembuf sem_op_wait_full = {0, -1, 0};
+        semop(sem_full, &sem_op_wait_full, 1);
 
-    shmctl(shmid, IPC_RMID, NULL);
-    semctl(semid, 0, IPC_RMID);
+        struct sembuf sem_op_lock = {0, -1, 0};
+        semop(sem_mutex, &sem_op_lock, 1);
+
+        enqueue(path_queue, argv[i]);
+
+        struct sembuf sem_op_unlock = {0, 1, 0};
+        semop(sem_mutex, &sem_op_unlock, 1);
+
+        struct sembuf sem_op_signal_empty = {0, 1, 0};
+        semop(sem_empty, &sem_op_signal_empty, 1);
+    }
+
+    if (shmdt(path_queue) == -1) {
+        perror("shmdt");
+        exit(1);
+    }
+
+    if (shmctl(shmid, IPC_RMID, NULL) == -1) {
+        perror("shmctl");
+        exit(1);
+    }
+
+    semctl(sem_mutex, 0, IPC_RMID);
+
     return 0;
 }
 
@@ -170,18 +199,23 @@ int count_files_in_folder(const char *path, struct Queue *file_queue, struct Que
 }
 
 void copy_file(const char *source_path, const char *destination_path) {
+    /*
+        Recieves two file paths and copies source path into destination path in a binary level
+        Uses BUFFER_SIZE to read chunks of the source file and copy them into the destination file
+        until there is no more data to copy
+        Does not return anything.
+    */
     FILE *src_file, *dest_file;
     char buffer[BUFFER_SIZE];
     size_t bytes_read;
+    printf("Copying %s to %s in process: %d\n", source_path, destination_path, getpid());
 
-    // Open the source file for reading
     src_file = fopen(source_path, "rb");
     if (src_file == NULL) {
         perror("Error opening source file");
         return;
     }
 
-    // Open the destination file for writing
     dest_file = fopen(destination_path, "wb");
     if (dest_file == NULL) {
         perror("Error opening destination file");
@@ -189,12 +223,10 @@ void copy_file(const char *source_path, const char *destination_path) {
         return;
     }
 
-    // Copy contents from source file to destination file
     while ((bytes_read = fread(buffer, 1, sizeof(buffer), src_file)) > 0) {
         fwrite(buffer, 1, bytes_read, dest_file);
     }
 
-    // Close files
     fclose(src_file);
     fclose(dest_file);
 
@@ -296,6 +328,10 @@ char *remove_file_name(const char *path){
 }
 
 void call_copy_file(struct Queue *file_queue, struct Queue *new_path_queue){
+    /*
+        Recieves two file paths queues and copies files from file_queue to new_path_queue
+        Used merely for testing.
+    */
     int pid = (int) getpid();
     char *file = dequeue(file_queue);
     char *new_file = dequeue(new_path_queue);
@@ -304,6 +340,7 @@ void call_copy_file(struct Queue *file_queue, struct Queue *new_path_queue){
         return;
     } else if (!file | !new_file) {
         printf("Error, files and new paths do not match.");
+        return;
     } else {
         printf("Process: %d copying file from %s to %s.\n", pid, file, new_file);
         copy_file(file,new_file);

@@ -74,4 +74,16 @@ void printQueue(struct Queue *q) {
         current = current->next;
     }
 }
+
+int size(struct Queue* q) {
+    int count = 0;
+    struct QueueNode *current = q->front;
+
+    while (current != NULL) {
+        count++;
+        current = current->next;
+    }
+
+    return count;
+}
 #endif
