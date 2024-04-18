@@ -6,65 +6,41 @@
 #include <stdio.h>
 #include <unistd.h>
 
+#include <sys/types.h>
+#include <sys/msg.h>
+#include <string.h>
+#include <signal.h>
+
 #include "queue.h"
 
 #define MAX_PATH_LENGTH 512
 #define BUFFER_SIZE 4096
 #define PROCESS_AMOUNT 3
-#define SHM_KEY 1234
-#define SEM_KEY 5678
+
+#define MSGSZ 128
+#define SHARED_MEM_SIZE sizeof(struct SharedMemory)
 
 int count_files_in_folder(const char *path, struct Queue *file_queue, struct Queue *new_path_queue);
 void copy_file(const char *source_path, const char *destination_path);
 char *replace_source_path(const char *source_path, const char *file_source_path, const char *destination_path);
 int create_folders(const char *path);
 char *remove_file_name(const char *path);
-void call_copy_file(struct Queue *file_queue, struct Queue *new_path_queue);
+void send_child_copy_file(char *source_path, char *destination_path, int type, int msqid);
+void receive_path_from_parent(char *source_path, char *destination_path, int child_id, int msqid);
+void send_path_to_child(const char *source_path, const char *destination_path, int msqid);
+
+struct paths {
+    long type;
+    char source_path[MAX_PATH_LENGTH];
+    char destination_path[MAX_PATH_LENGTH];
+};
 
 int main(int argc, char *argv[]){
     char path_folder_1[MAX_PATH_LENGTH];
     char path_folder_2[MAX_PATH_LENGTH];
 
-        int shmid, semid;
-    struct SharedMemory {
-        struct Queue *path_queue;
-        struct Queue *new_path_queue;
-    };
-    struct SharedMemory *shared_memory = malloc(sizeof(struct SharedMemory));
-    int pid;
-
-    shmid = shmget(SHM_KEY, sizeof(struct SharedMemory), IPC_CREAT | 0666);
-    if (shmid == -1) {
-        perror("shmget");
-        exit(1);
-    }
-
-    shared_memory = (struct SharedMemory *)shmat(shmid, NULL, 0);
-    if (shared_memory == (void *)-1) {
-        perror("shmat");
-        exit(1);
-    }
-
-    shared_memory->path_queue = createQueue();
-    shared_memory->new_path_queue = createQueue();
-
-    semid = semget(SEM_KEY, PROCESS_AMOUNT, IPC_CREAT | 0666);
-    if (semid == -1) {
-        perror("semget");
-        exit(1);
-    }
-
-    for (int i = 0; i < PROCESS_AMOUNT; i++) {
-    if (semctl(semid, i, SETVAL, 1) == -1) {
-        perror("semctl");
-        exit(1);
-    }
-}
-
-    if (argc != 3){
-        printf("Not enough routes.\n");
-        return 1;
-    }
+    struct Queue *path_queue = createQueue();
+    struct Queue *new_path_queue = createQueue();
 
     strncpy(path_folder_1, argv[1], MAX_PATH_LENGTH - 1);
     strncpy(path_folder_2, argv[2], MAX_PATH_LENGTH - 1);
@@ -75,52 +51,79 @@ int main(int argc, char *argv[]){
     printf("First folder path is: %s\n", path_folder_1);
     printf("Second folder path is: %s\n", path_folder_2);
 
-    int file_count = count_files_in_folder(path_folder_1, shared_memory->path_queue, shared_memory->new_path_queue);
+    int file_count = count_files_in_folder(path_folder_1, path_queue, new_path_queue);
 
-    for (int i = 0; i < PROCESS_AMOUNT; i++) {
-        pid = fork();
-        if (pid == -1) {
-            perror("fork");
-            exit(1);
+    int status;
+    key_t msqkey = 999;
+    int msqid = msgget(msqkey, IPC_CREAT | S_IRUSR | S_IWUSR);
+    key_t conkey = 888;
+    int conid = msgget(conkey, IPC_CREAT | S_IRUSR | S_IWUSR);
+    int pids[PROCESS_AMOUNT];
+
+    struct paths path_msg;
+
+    int terminated_amount = 0;
+
+    for (int i = 0; i < PROCESS_AMOUNT; i++){
+        pid_t pid = fork();
+        pids[i] = pid;
+        if (pid < 0) {
+            perror("Fork failed");
+            exit(EXIT_FAILURE);
         } else if (pid == 0) {
-            while (!isEmpty(shared_memory->path_queue) && !isEmpty(shared_memory->new_path_queue)) {
-                struct sembuf sem_op;
-                sem_op.sem_num = 0;
-                sem_op.sem_op = -1;
-                sem_op.sem_flg = 0;
-                if (semop(semid, &sem_op, 1) == -1) {
-                    perror("semop");
-                    exit(1);
-                }
+            int confirmation;
+            while (1){
+                
+                char source_path[MAX_PATH_LENGTH];
+                char destination_path[MAX_PATH_LENGTH];
 
-                char *file = dequeue(shared_memory->path_queue);
-                char *new_file = dequeue(shared_memory->new_path_queue);
+                receive_path_from_parent(source_path, destination_path, i + 1, msqid);
 
-                sem_op.sem_op = 1;
-                if (semop(semid, &sem_op, 1) == -1) {
-                    perror("semop");
-                    exit(1);
+                if (strlen(source_path) == 0 && strlen(destination_path) == 0) {
+                    if (msgrcv(conid,&confirmation,sizeof(confirmation),0,0) == -1){
+                        perror("Error receiving confirmation message");
+                        exit(EXIT_FAILURE);
+                    }
+                    break;
                 }
-
-                if (file != NULL && new_file != NULL) {
-                    printf("Process %d dequeued file: %s, new path: %s\n", getpid(), file, new_file);
-                    copy_file(file,new_file);
-                }
+                copy_file(source_path,destination_path);
+                printf("Child process with id: %d received source path: %s and destination path: %s\n", getpid(), source_path, destination_path);
             }
-            exit(0);
-        } else {
-            wait(NULL);
+            if (confirmation){
+                exit(EXIT_SUCCESS);
+            }
+            
+        }
+    }
+
+    while(!isEmpty(path_queue)){
+        for (int i = 0; i < PROCESS_AMOUNT; i++){
+            char *source_path = dequeue(path_queue);
+            char *destination_path = dequeue(new_path_queue);
+            
+            if (source_path != NULL){
+                send_child_copy_file(source_path, destination_path, i+1, msqid);
+            }
+            free(source_path);
+            free(destination_path);
+        }
+    }
+    
+    for (int i = 0; i < PROCESS_AMOUNT; i++){
+        send_child_copy_file("","",i+1,msqid);
+        int confirmation = 1;
+        if (msgsnd(conid, &confirmation, sizeof(int), 0) == -1) {
+            perror("Confirmation message failed");
+            exit(EXIT_FAILURE);
         }
     }
 
     for (int i = 0; i < PROCESS_AMOUNT; i++) {
-        wait(NULL);
+        wait(&status);
     }
 
-    shmdt(shared_memory);
+    msgctl(msqid, IPC_RMID, NULL);
 
-    shmctl(shmid, IPC_RMID, NULL);
-    semctl(semid, 0, IPC_RMID);
     return 0;
 }
 
@@ -170,18 +173,22 @@ int count_files_in_folder(const char *path, struct Queue *file_queue, struct Que
 }
 
 void copy_file(const char *source_path, const char *destination_path) {
+    /*
+        Recieves two files paths, one is the source (file to be copied)
+        and the other one is the destination (where the data will be pasted)
+        Uses a 4096 bytes buffer to read chunks from the file
+        Does not return anything but prints a message when the job is done
+    */
     FILE *src_file, *dest_file;
     char buffer[BUFFER_SIZE];
     size_t bytes_read;
 
-    // Open the source file for reading
     src_file = fopen(source_path, "rb");
     if (src_file == NULL) {
         perror("Error opening source file");
         return;
     }
 
-    // Open the destination file for writing
     dest_file = fopen(destination_path, "wb");
     if (dest_file == NULL) {
         perror("Error opening destination file");
@@ -189,12 +196,10 @@ void copy_file(const char *source_path, const char *destination_path) {
         return;
     }
 
-    // Copy contents from source file to destination file
     while ((bytes_read = fread(buffer, 1, sizeof(buffer), src_file)) > 0) {
         fwrite(buffer, 1, bytes_read, dest_file);
     }
 
-    // Close files
     fclose(src_file);
     fclose(dest_file);
 
@@ -225,7 +230,6 @@ char *replace_source_path(const char *source_path, const char *file_source_path,
     
     strcat(new_path, file_source_path + source_path_len);
     
-    //printf("Path created: %s\n", new_path);
     return new_path;
 }
 
@@ -295,18 +299,59 @@ char *remove_file_name(const char *path){
     return new_path;
 }
 
-void call_copy_file(struct Queue *file_queue, struct Queue *new_path_queue){
-    int pid = (int) getpid();
-    char *file = dequeue(file_queue);
-    char *new_file = dequeue(new_path_queue);
-    if (!file && !new_file){
-        printf("No more files to copy.");
-        return;
-    } else if (!file | !new_file) {
-        printf("Error, files and new paths do not match.");
-    } else {
-        printf("Process: %d copying file from %s to %s.\n", pid, file, new_file);
-        copy_file(file,new_file);
-        return;
+void send_child_copy_file(char *source_path, char *destination_path, int type, int msqid){
+    /*
+        This function receives the source path, the destination path, the message type and the message queue id
+        It is only runned in the main (parent) process.
+        It sends the paths inside a paths struct to the child that consumes that data and uses it.
+    */
+    struct paths path_msg;
+    path_msg.type = type;
+    strcpy(path_msg.source_path, source_path);
+    strcpy(path_msg.destination_path, destination_path);
+
+    if (source_path != ""){
+        printf("Source path send from parent process: %s\n",path_msg.source_path);
+        printf("Destination path send from parent process: %s\n\n",path_msg.source_path);
     }
+    
+
+    if (msgsnd(msqid, (void *)&path_msg, sizeof(path_msg), IPC_NOWAIT) == -1) {
+        perror("Send child copy file failed");
+        exit(EXIT_FAILURE);
+    }
+}
+
+void send_path_to_child(const char *source_path, const char *destination_path, int msqid) {
+    /*
+        This function receives the source path, the destination path, the message type and the message queue id
+        It is only runned in the main (parent) process.
+        It sends the paths inside a paths struct to the child that consumes that data and uses it.
+    */
+    struct paths path_msg;
+
+    strncpy(path_msg.source_path, source_path, sizeof(path_msg.source_path));
+    strncpy(path_msg.destination_path, destination_path, sizeof(path_msg.destination_path));
+
+    if (msgsnd(msqid, &path_msg, sizeof(path_msg), 0) == -1) {
+        perror("Path message sending failed");
+        exit(EXIT_FAILURE);
+    }
+}
+
+void receive_path_from_parent(char *source_path, char *destination_path, int child_id, int msqid) {
+    /*
+        This function receives the source path, the destination path, the child_id and the message queue id.
+        It is only runned in the child processes.
+        It receives the paths send by the parent process.
+    */
+    struct paths path_msg;
+
+    if (msgrcv(msqid, &path_msg, sizeof(path_msg), child_id, 0) == -1) {
+        perror("Failed to receive path message");
+        exit(EXIT_FAILURE);
+    }
+
+    strncpy(source_path, path_msg.source_path, sizeof(path_msg.source_path));
+    strncpy(destination_path, path_msg.destination_path, sizeof(path_msg.destination_path));
 }
