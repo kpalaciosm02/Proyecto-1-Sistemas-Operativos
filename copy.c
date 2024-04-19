@@ -22,7 +22,6 @@ int create_folders(const char *path);
 char *remove_file_name(const char *path);
 void send_child_copy_file(char *source_path, char *destination_path, int type, int msqid);
 void receive_path_from_parent(char *source_path, char *destination_path, int child_id, int msqid);
-void send_path_to_child(const char *source_path, const char *destination_path, int msqid);
 
 struct paths {
     long type;
@@ -322,23 +321,6 @@ void send_child_copy_file(char *source_path, char *destination_path, int type, i
 
     if (msgsnd(msqid, (void *)&path_msg, sizeof(path_msg), IPC_NOWAIT) == -1) {
         perror("Send child copy file failed");
-        exit(EXIT_FAILURE);
-    }
-}
-
-void send_path_to_child(const char *source_path, const char *destination_path, int msqid) {
-    /*
-        This function receives the source path, the destination path, the message type and the message queue id
-        It is only runned in the main (parent) process.
-        It sends the paths inside a paths struct to the child that consumes that data and uses it.
-    */
-    struct paths path_msg;
-
-    strncpy(path_msg.source_path, source_path, sizeof(path_msg.source_path));
-    strncpy(path_msg.destination_path, destination_path, sizeof(path_msg.destination_path));
-
-    if (msgsnd(msqid, &path_msg, sizeof(path_msg), 0) == -1) {
-        perror("Path message sending failed");
         exit(EXIT_FAILURE);
     }
 }
