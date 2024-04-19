@@ -3,17 +3,17 @@
 #include <sys/wait.h>
 #include <stdio.h>
 #include <unistd.h>
-
 #include <sys/types.h>
 #include <sys/msg.h>
 #include <string.h>
 #include <signal.h>
+#include <time.h>
 
 #include "queue.h"
 
 #define MAX_PATH_LENGTH 512
 #define BUFFER_SIZE 4096
-#define PROCESS_AMOUNT 3
+#define PROCESS_AMOUNT 4
 
 int count_files_in_folder(const char *path, struct Queue *file_queue, struct Queue *new_path_queue, const char *new_path, const char *source_path_untouchable);
 void copy_file(const char *source_path, const char *destination_path);
@@ -30,6 +30,8 @@ struct paths {
 };
 
 int main(int argc, char *argv[]){
+    clock_t start_time = clock();
+
     char path_folder_1[MAX_PATH_LENGTH];
     char path_folder_2[MAX_PATH_LENGTH];
 
@@ -119,6 +121,12 @@ int main(int argc, char *argv[]){
     }
 
     msgctl(msqid, IPC_RMID, NULL);
+
+    clock_t end_time = clock();
+
+    double time = ((double) (end_time - start_time)) / CLOCKS_PER_SEC;
+
+    printf("Execution time with %d processes: %f\n", PROCESS_AMOUNT, time);
 
     return 0;
 }
