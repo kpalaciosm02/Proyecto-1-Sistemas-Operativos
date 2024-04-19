@@ -1,7 +1,5 @@
 #include <dirent.h>
 #include <sys/stat.h>
-#include <sys/shm.h>
-#include <sys/sem.h>
 #include <sys/wait.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -17,10 +15,7 @@
 #define BUFFER_SIZE 4096
 #define PROCESS_AMOUNT 3
 
-#define MSGSZ 128
-#define SHARED_MEM_SIZE sizeof(struct SharedMemory)
-
-int count_files_in_folder(const char *path, struct Queue *file_queue, struct Queue *new_path_queue);
+int count_files_in_folder(const char *path, struct Queue *file_queue, struct Queue *new_path_queue, const char *new_path, const char *source_path_untouchable);
 void copy_file(const char *source_path, const char *destination_path);
 char *replace_source_path(const char *source_path, const char *file_source_path, const char *destination_path);
 int create_folders(const char *path);
@@ -51,7 +46,11 @@ int main(int argc, char *argv[]){
     printf("First folder path is: %s\n", path_folder_1);
     printf("Second folder path is: %s\n", path_folder_2);
 
-    int file_count = count_files_in_folder(path_folder_1, path_queue, new_path_queue);
+    int file_count = count_files_in_folder(path_folder_1, path_queue, new_path_queue, path_folder_2, path_folder_1);
+
+    if (file_count == 0){
+        exit(EXIT_SUCCESS);
+    }
 
     int status;
     key_t msqkey = 999;
@@ -61,8 +60,6 @@ int main(int argc, char *argv[]){
     int pids[PROCESS_AMOUNT];
 
     struct paths path_msg;
-
-    int terminated_amount = 0;
 
     for (int i = 0; i < PROCESS_AMOUNT; i++){
         pid_t pid = fork();
@@ -127,7 +124,7 @@ int main(int argc, char *argv[]){
     return 0;
 }
 
-int count_files_in_folder(const char *path, struct Queue *file_queue, struct Queue *new_path_queue){
+int count_files_in_folder(const char *path, struct Queue *file_queue, struct Queue *new_path_queue, const char *new_path , const char *source_path_untouchable){
     /*
         Recieves a directory path and a pointer to a queue that stores paths
         Counts every file in the directory and each of the subdirectories and 
@@ -140,6 +137,7 @@ int count_files_in_folder(const char *path, struct Queue *file_queue, struct Que
 
     if ((dir = opendir(path)) == NULL){
         fprintf(stderr, "Cannot open directory: %s\n", path);
+        return 0;
     }
 
     while ((entry = readdir(dir)) != NULL) {
@@ -155,12 +153,12 @@ int count_files_in_folder(const char *path, struct Queue *file_queue, struct Que
             if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
                 continue;
 
-            count += count_files_in_folder(full_path, file_queue, new_path_queue);
+            count += count_files_in_folder(full_path, file_queue, new_path_queue, new_path, source_path_untouchable);
         } else if (S_ISREG(statbuf.st_mode)) {
             enqueue(file_queue,full_path);
             char * full_path_tmp = malloc(strlen(full_path) + 1);
             strcpy(full_path_tmp,full_path);
-            char * new_file_path = replace_source_path("/home/kenneth/Desktop/copy-this",full_path_tmp,"/home/kenneth/Desktop/paste-here");
+            char * new_file_path = replace_source_path(source_path_untouchable,full_path_tmp,new_path);
             enqueue(new_path_queue,new_file_path);
             char * expected_folder_name = remove_file_name(new_file_path);
             create_folders(expected_folder_name);
@@ -189,9 +187,9 @@ void copy_file(const char *source_path, const char *destination_path) {
         return;
     }
 
-    fseek(src_file, 0, SEEK_END); // Move to the end of the file
-    long int file_size = ftell(src_file); // Get the current position, which is the file size
-    fseek(src_file, 0, SEEK_SET); // Reset file pointer to the beginning
+    fseek(src_file, 0, SEEK_END);
+    long int file_size = ftell(src_file);
+    fseek(src_file, 0, SEEK_SET);
 
     printf("Source file: %s size: %ld bytes\n", source_path, file_size);
 
